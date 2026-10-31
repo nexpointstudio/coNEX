@@ -1,0 +1,4 @@
+project_id = "conex-local"
+
+[functions.account]
+verify_jwt = false
