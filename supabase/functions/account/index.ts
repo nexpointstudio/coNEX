@@ -2,10 +2,11 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.79.0'
 import { signupEnabled, technicalEmail, validateInput } from './policy.ts'
+import { defaultKey } from './keys.ts'
 
 const url = Deno.env.get('SUPABASE_URL')!
-const adminKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-const anonKey = Deno.env.get('SUPABASE_ANON_KEY')!
+const adminKey = defaultKey(Deno.env.get('SUPABASE_SECRET_KEYS'), 'sb_secret_')
+const anonKey = defaultKey(Deno.env.get('SUPABASE_PUBLISHABLE_KEYS'), 'sb_publishable_')
 
 const origins = (Deno.env.get('APP_ORIGINS') ?? '')
   .split(',')
