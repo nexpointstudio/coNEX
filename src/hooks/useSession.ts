@@ -4,9 +4,9 @@ import { supabase } from '../lib/supabase/client'
 
 export function useSession() {
   const [session, setSession] = useState<Session | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(Boolean(supabase))
   useEffect(() => {
-    if (!supabase) { setLoading(false); return }
+    if (!supabase) return
     void supabase.auth.getSession().then(({ data }) => { setSession(data.session); setLoading(false) })
     const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => { setSession(next); setLoading(false) })
     return () => listener.subscription.unsubscribe()

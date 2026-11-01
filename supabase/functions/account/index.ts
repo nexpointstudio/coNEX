@@ -1,6 +1,7 @@
 
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.79.0'
+import { signupEnabled, technicalEmail, validateInput } from './policy.ts'
 
 const url = Deno.env.get('SUPABASE_URL')!
 const adminKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -10,8 +11,6 @@ const origins = (Deno.env.get('APP_ORIGINS') ?? '')
   .split(',')
   .map(value => value.trim())
   .filter(Boolean)
-
-const usernamePattern = /^[a-z0-9_]{3,24}$/
 
 const admin = createClient(url, adminKey, {
   auth: { persistSession: false },
@@ -64,6 +63,20 @@ async function checkRate(
   return !error && data === true
 }
 
+async function verifyChallenge(token: string, origin: string) {
+  const secret = Deno.env.get('TURNSTILE_SECRET_KEY')
+  if (!secret || !token || token.length > 2048) return false
+  const body = new URLSearchParams({ secret, response: token })
+  const result = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    body,
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!result.ok) return false
+  const data = await result.json()
+  return data.success === true && data.hostname === new URL(origin).hostname
+}
+
 Deno.serve(async request => {
   const origin = request.headers.get('origin') ?? ''
 
@@ -94,47 +107,7 @@ Deno.serve(async request => {
       )
     }
 
-    const input = JSON.parse(raw)
-
-    if (!input || typeof input !== 'object') {
-      return response(
-        { error: 'Dados inválidos.' },
-        400,
-        origin,
-      )
-    }
-
-    const action = input.action
-
-    if (action !== 'login' && action !== 'register') {
-      return response(
-        { error: 'Ação inválida.' },
-        400,
-        origin,
-      )
-    }
-
-    const username =
-      typeof input.username === 'string'
-        ? input.username.trim().toLowerCase()
-        : ''
-
-    const password =
-      typeof input.password === 'string'
-        ? input.password
-        : ''
-
-    if (
-      !usernamePattern.test(username) ||
-      password.length < 1 ||
-      password.length > 128
-    ) {
-      return response(
-        { error: 'Nome de usuário ou senha inválidos.' },
-        400,
-        origin,
-      )
-    }
+    const { action, username, password, challenge } = validateInput(JSON.parse(raw))
 
     if (action === 'login') {
       const bucket = `login:${await sha256(username)}`
@@ -200,10 +173,7 @@ Deno.serve(async request => {
 
     // CADASTRO SEM CONVITE
 
-    const signupEnabled =
-      Deno.env.get('ALLOW_PUBLIC_SIGNUP') === 'true'
-
-    if (!signupEnabled) {
+    if (!signupEnabled(Deno.env.get('ALLOW_PUBLIC_SIGNUP'))) {
       return response(
         { error: 'Novos cadastros estão temporariamente fechados.' },
         403,
@@ -211,49 +181,26 @@ Deno.serve(async request => {
       )
     }
 
-    if (password.length < 12) {
-      return response(
-        { error: 'A senha deve ter pelo menos 12 caracteres.' },
-        400,
-        origin,
-      )
+    const emailBase = Deno.env.get('ACCOUNT_EMAIL_BASE') ?? ''
+    let email: string
+    try {
+      email = technicalEmail(emailBase, Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => byte.toString(16).padStart(2, '0')).join(''))
+    } catch {
+      return response({ error: 'Cadastro indisponível no momento.' }, 503, origin)
     }
-
-    const domain = (
-      Deno.env.get('ACCOUNT_EMAIL_DOMAIN') ?? ''
-    ).trim().toLowerCase()
-
-    if (
-      !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(domain) ||
-      /(?:\.invalid|\.test|\.localhost|\.local)$/.test(domain) ||
-      domain === 'example.com'
-    ) {
-      return response(
-        { error: 'Domínio interno de contas não configurado.' },
-        503,
-        origin,
-      )
+    let verified = false
+    try {
+      verified = await verifyChallenge(challenge, origin)
+    } catch {
+      return response({ error: 'Verificação temporariamente indisponível.' }, 503, origin)
     }
-
-    // Limites iniciais para testes privados:
-    // 6 solicitações de cadastro por hora globalmente.
-    // 4 tentativas por nome em 15 minutos.
-    if (!(await checkRate('register:global', 6, 3600))) {
-      return response(
-        { error: 'Limite temporário de cadastros atingido.' },
-        429,
-        origin,
-      )
+    if (!verified) {
+      return response({ error: 'Verificação de segurança inválida ou expirada.' }, 403, origin)
     }
 
     const bucket = `register:${await sha256(username)}`
-
     if (!(await checkRate(bucket, 4, 900))) {
-      return response(
-        { error: 'Muitas tentativas. Tente novamente mais tarde.' },
-        429,
-        origin,
-      )
+      return response({ error: 'Muitas tentativas. Tente novamente mais tarde.' }, 429, origin)
     }
 
     const { data: existing, error: lookupError } =
@@ -279,12 +226,15 @@ Deno.serve(async request => {
       )
     }
 
-    const technicalEmail =
-      `${crypto.randomUUID()}@${domain}`
+    // O limite global não é consumido por tokens inválidos ou nomes já existentes.
+    if (!(await checkRate('register:global', 6, 3600))) {
+      return response({ error: 'Limite temporário de cadastros atingido.' }, 429, origin)
+    }
+
 
     const { data: created, error: createError } =
       await admin.auth.admin.createUser({
-        email: technicalEmail,
+        email,
         password,
         email_confirm: true,
         user_metadata: { username },
@@ -316,12 +266,7 @@ Deno.serve(async request => {
       const { error: cleanupError } =
         await admin.auth.admin.deleteUser(userId)
 
-      if (cleanupError) {
-        console.error(
-          'Falha na limpeza de conta incompleta:',
-          userId,
-        )
-      }
+      if (cleanupError) console.error('Falha na limpeza de conta incompleta:', cleanupError.code ?? 'unknown')
 
       return response(
         {
@@ -340,9 +285,9 @@ Deno.serve(async request => {
       201,
       origin,
     )
-  } catch {
+  } catch (cause) {
     return response(
-      { error: 'Dados inválidos ou falha temporária.' },
+      { error: cause instanceof Error && ['Dados inválidos.', 'Ação inválida.', 'Nome de usuário ou senha inválidos.', 'A senha deve ter de 8 a 128 caracteres.'].includes(cause.message) ? cause.message : 'Dados inválidos ou falha temporária.' },
       400,
       origin,
     )

@@ -5,6 +5,7 @@ import { AuthScreen } from './features/auth/AuthScreen'
 import { logout } from './features/auth/auth'
 import { useChat } from './features/chat/useChat'
 import { channels, type Channel } from './features/chat/types'
+import { isNearBottom } from './features/chat/messageState'
 import { useNotifications } from './features/notifications/useNotifications'
 import { useSession } from './hooks/useSession'
 import { configured } from './lib/supabase/client'
@@ -19,15 +20,18 @@ function ConnectedChat({ channel, session, draft, setDraft }: ChatProps) {
   const [sending, setSending] = useState(false)
   const scroll = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
+  const pending = useRef<{ id: string; content: string } | null>(null)
   useEffect(() => { if (pinned.current) scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }) }, [messages])
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (sending) return
     setSending(true); setSendError('')
-    try { await send(draft); setDraft('') } catch (cause) { setSendError(cause instanceof Error ? cause.message : 'Falha ao enviar.') }
+    const content = draft.trim()
+    if (!pending.current || pending.current.content !== content) pending.current = { id: crypto.randomUUID(), content }
+    try { await send(draft, pending.current.id); pending.current = null; setDraft('') } catch (cause) { setSendError(cause instanceof Error ? cause.message : 'Falha ao enviar.') }
     finally { setSending(false) }
   }
-  return <><div className="chat-scroll" ref={scroll} onScroll={event => { const element = event.currentTarget; pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}>
+  return <><div className="chat-scroll" ref={scroll} onScroll={event => { const element = event.currentTarget; pinned.current = isNearBottom(element.scrollHeight, element.scrollTop, element.clientHeight) }}>
     <div className="chat-intro"><div className="intro-icon"><Hash size={28}/></div><div className="eyebrow">CANAL DE TEXTO</div><h2>Bem-vindo ao #{channel}</h2><p>Converse e organize suas atividades no coNEX.</p></div>
     <div className="chat-date-divider"><span>{connection === 'online' ? 'Conectado' : connection === 'connecting' ? 'Conectando...' : 'Conexão perdida. Reconectando...'}</span></div>
     {error && <p role="alert">{error} <button onClick={() => void reload()}>Tentar novamente</button></p>}
@@ -44,7 +48,7 @@ function App() {
   const { session, loading } = useSession()
   if (loading) return <div className="auth-screen">Carregando coNEX...</div>
   if (configured && !session) return <><AuthScreen/><PwaStatus draftPending={false}/></>
-  return <Workspace session={session}/>
+  return <Workspace key={session?.user.id ?? 'preview'} session={session}/>
 }
 
 function Workspace({ session }: { session: Session | null }) {
@@ -53,18 +57,23 @@ function Workspace({ session }: { session: Session | null }) {
   const [drafts, setDrafts] = useState<Record<Channel, string>>({ geral: '', desenvolvimento: '', compartilhamentos: '' })
   const [menuOpen, setMenuOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [logoutError, setLogoutError] = useState('')
   const notifications = useNotifications(session)
   const markChannelRead = notifications.markChannelRead
   useEffect(() => {
-    if (session && notifications.items.some(item => item.channel_id === channel && !item.read_at)) {
+    if (session && area === 'chat' && notifications.items.some(item => item.channel_id === channel && !item.read_at)) {
       void markChannelRead(channel)
     }
-  }, [channel, notifications.items, session, markChannelRead])
+  }, [area, channel, notifications.items, session, markChannelRead])
   const username = String(session?.user.user_metadata?.username ?? 'Meu perfil')
   const draft = drafts[channel]
   const setDraft = (value: string) => setDrafts(current => ({ ...current, [channel]: value }))
   function changeArea(value: Area) { setArea(value); setMenuOpen(false) }
   function changeChannel(value: Channel) { setChannel(value); changeArea('chat') }
+  async function signOut() {
+    setLogoutError('')
+    try { await logout() } catch (cause) { setLogoutError(cause instanceof Error ? cause.message : 'Não foi possível sair.') }
+  }
   const title = area === 'chat' ? channel : area === 'studio' ? 'Studio' : 'Social'
   return <><div className="app-shell">
     <aside className="app-rail"><div className="rail-logo" title="coNEX">N</div><div className="rail-divider"/>
@@ -76,7 +85,7 @@ function Workspace({ session }: { session: Session | null }) {
     <aside className={`app-sidebar ${menuOpen ? 'open' : ''}`}><div className="workspace-header"><div className="workspace-symbol">N</div><div className="workspace-name"><strong>NexPoint Studio</strong><span>{session ? 'Espaço privado' : 'Prévia local'}</span></div><ChevronDown size={17}/></div>
       <div className="sidebar-scroll"><div className="sidebar-label">CANAIS DE TEXTO</div>{channels.map(item => <button key={item} className={`channel-link ${area === 'chat' && channel === item ? 'selected' : ''}`} onClick={() => changeChannel(item)}><Hash size={17}/><span>{item}</span></button>)}
         <div className="sidebar-label space-top">CANAIS DE VOZ · INDISPONÍVEIS</div><div className="channel-link static-channel"><Headphones size={17}/><span>Sala de criação</span></div><div className="channel-link static-channel"><Gamepad2 size={17}/><span>Jogando juntos</span></div><div className="voice-note"><Radio size={14}/>Chamadas em outra etapa</div></div>
-      <div className="profile-bar"><div className="profile-avatar">{username.slice(0, 2).toUpperCase()}<span className="online-indicator"/></div><div className="profile-info"><strong>{username}</strong><span>{session ? 'Conectado' : 'Demonstração'}</span></div>{session && <button className="logout-button" onClick={() => void logout()}>Sair</button>}</div>
+      <div className="profile-bar"><div className="profile-avatar">{username.slice(0, 2).toUpperCase()}<span className="online-indicator"/></div><div className="profile-info"><strong>{username}</strong><span>{session ? 'Conectado' : 'Demonstração'}</span></div>{session && <button className="logout-button" onClick={() => void signOut()}>Sair</button>}{logoutError && <span role="alert">{logoutError}</span>}</div>
     </aside>
     <main className="app-main"><header className="main-header"><button className="mobile-menu" aria-label="Abrir menu" onClick={() => setMenuOpen(true)}><Menu size={22}/></button><div className="header-title"><span className="header-path">coNEX / NexPoint Studio</span><h1>{area === 'chat' ? <Hash size={21}/> : <Sparkles size={21}/>} {title}</h1></div><div className="header-actions"><span className="preview-pill"><span className="preview-dot"/>{session ? 'Espaço privado' : 'Prévia local'}</span><button className="header-icon-button" aria-label={`Notificações: ${notifications.unread} não lidas`} title="Notificações" onClick={() => setNotificationsOpen(!notificationsOpen)}><Bell size={20}/>{notifications.unread > 0 && <span className="notification-count">{notifications.unread}</span>}</button></div>
       {notificationsOpen && <div className="notifications-popup"><div className="popup-heading"><strong>Notificações</strong><button aria-label="Fechar notificações" onClick={() => setNotificationsOpen(false)}><X size={17}/></button></div>{notifications.error && <p role="alert">{notifications.error}</p>}{!session ? <p>Disponíveis após configurar o Supabase.</p> : notifications.items.length === 0 ? <p>Nenhuma notificação.</p> : <><button className="text-button" onClick={() => void notifications.markRead()}>Marcar todas como lidas</button>{notifications.items.map(item => <button key={item.id} className={`popup-item notification-item ${!item.read_at ? 'unread' : ''}`} onClick={() => { changeChannel(item.channel_id); void notifications.markRead(item.id); setNotificationsOpen(false) }}><Bell size={16}/><span>Nova mensagem em #{item.channel_id}<small>{new Date(item.created_at).toLocaleString('pt-BR')}</small></span></button>)}</>}</div>}</header>

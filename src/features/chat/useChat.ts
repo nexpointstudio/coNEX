@@ -2,19 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../../lib/supabase/client'
 import { validateMessage, type Channel, type Message } from './types'
+import { mergeMessages } from './messageState'
 
 const pageSize = 40
-function merge(current: Message[], incoming: Message[]) {
-  const map = new Map(current.map(message => [message.id, message]))
-  incoming.forEach(message => map.set(message.id, message))
-  return [...map.values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
-}
-
 export function useChat(channel: Channel, session: Session) {
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(true)
   const [hasMore, setHasMore] = useState(false)
-  const [connection, setConnection] = useState<'connecting' | 'online' | 'offline'>('connecting')
+  const [connection, setConnection] = useState<'connecting' | 'online' | 'offline'>(navigator.onLine ? 'connecting' : 'offline')
   const [error, setError] = useState('')
   const oldest = useRef<Message | null>(null)
 
@@ -28,7 +23,7 @@ export function useChat(channel: Channel, session: Session) {
     const { data, error: queryError } = await query
     if (queryError) { setError('Falha ao carregar mensagens. Tente novamente.'); setLoading(false); return }
     const page = (data ?? []) as unknown as Message[]
-    setMessages(current => merge(current, page))
+    setMessages(current => mergeMessages(current, page))
     const first = !oldest.current
     if (older || first) oldest.current = page.at(-1) ?? oldest.current
     if (older || first) setHasMore(page.length === pageSize)
@@ -36,11 +31,8 @@ export function useChat(channel: Channel, session: Session) {
   }, [channel])
 
   useEffect(() => {
-    setMessages([])
-    oldest.current = null
-    setLoading(true)
-    setConnection(navigator.onLine ? 'connecting' : 'offline')
-    void fetchPage()
+    let active = true
+    queueMicrotask(() => { if (active) void fetchPage() })
     const online = () => { setConnection('connecting'); void fetchPage() }
     const offline = () => setConnection('offline')
     window.addEventListener('online', online)
@@ -52,17 +44,18 @@ export function useChat(channel: Channel, session: Session) {
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') setConnection('offline')
       })
     return () => {
+      active = false
       window.removeEventListener('online', online)
       window.removeEventListener('offline', offline)
       if (stream) void supabase?.removeChannel(stream)
     }
   }, [channel, fetchPage])
 
-  async function send(text: string) {
+  async function send(text: string, id: string) {
     if (!supabase) throw new Error('Supabase não configurado.')
     const content = validateMessage(text)
-    const { error: sendError } = await supabase.from('messages').insert({ channel_id: channel, author_id: session.user.id, content })
-    if (sendError) throw new Error('Mensagem não enviada. Verifique sua conexão e tente novamente.')
+    const { error: sendError } = await supabase.from('messages').insert({ id, channel_id: channel, author_id: session.user.id, content })
+    if (sendError && sendError.code !== '23505') throw new Error('Mensagem não enviada. Verifique sua conexão e tente novamente.')
     await fetchPage()
   }
 

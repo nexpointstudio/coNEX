@@ -1,7 +1,8 @@
 
-import { useState, type FormEvent } from 'react'
+import { useCallback, useState, type FormEvent } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
 import { login, register } from './auth'
+import { Turnstile } from './Turnstile'
 
 export function AuthScreen() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -12,6 +13,9 @@ export function AuthScreen() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [challenge, setChallenge] = useState('')
+  const [challengeReset, setChallengeReset] = useState(0)
+  const onChallenge = useCallback((token: string) => setChallenge(token), [])
 
   function changeMode(nextMode: 'login' | 'register') {
     setMode(nextMode)
@@ -19,6 +23,7 @@ export function AuthScreen() {
     setSuccess('')
     setPassword('')
     setShowPassword(false)
+    setChallenge('')
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -32,7 +37,7 @@ export function AuthScreen() {
 
     try {
       if (mode === 'register') {
-        await register(username, password)
+        await register(username, password, challenge)
 
         setSuccess(
           'Conta criada com sucesso! Entre com seu nome e senha.',
@@ -49,6 +54,10 @@ export function AuthScreen() {
           ? cause.message
           : 'Ocorreu um erro inesperado.',
       )
+      if (mode === 'register') {
+        setChallenge('')
+        setChallengeReset(value => value + 1)
+      }
     } finally {
       setBusy(false)
     }
@@ -120,7 +129,7 @@ export function AuthScreen() {
                   : 'Digite sua senha'
               }
               required
-              minLength={mode === 'register' ? 12 : undefined}
+              minLength={mode === 'register' ? 8 : undefined}
               maxLength={128}
               value={password}
               onChange={(event) =>
@@ -163,10 +172,13 @@ export function AuthScreen() {
             Manter conectado neste dispositivo
           </label>
         ) : (
-          <p className="auth-help">
-            Escolha um nome de usuário único e uma senha
-            com pelo menos 12 caracteres.
-          </p>
+          <>
+            <p className="auth-help">
+              Escolha um nome de usuário único e uma senha
+              com pelo menos 8 caracteres.
+            </p>
+            <Turnstile onToken={onChallenge} resetKey={challengeReset} />
+          </>
         )}
 
         {error && (
@@ -184,7 +196,7 @@ export function AuthScreen() {
         <button
           className="auth-submit"
           type="submit"
-          disabled={busy}
+          disabled={busy || (mode === 'register' && !challenge)}
         >
           {busy
             ? 'Aguarde...'

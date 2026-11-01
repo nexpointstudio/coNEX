@@ -1,49 +1,37 @@
 # coNEX V1.0
 
-PWA React/Vite para um espaço privado com três canais de texto. Sem configuração do Supabase, a aplicação mostra somente uma prévia local, claramente identificada e sem envio de mensagens.
+Aplicação React, TypeScript e Vite para chat privado em três canais. O frontend usa Supabase Auth, PostgreSQL e Realtime. Sem variáveis Supabase, mostra apenas uma prévia local sem envio.
 
-## Desenvolvimento local
+## Requisitos e execução local
+
+- Node.js 24 e npm 11 (versões usadas neste projeto)
+- Projeto Supabase existente, com a migration inicial já aplicada
+- Widget gratuito Cloudflare Turnstile para cadastro público
 
 ```powershell
-npm.cmd install
+npm.cmd ci
 Copy-Item .env.example .env.local
 npm.cmd run dev
 ```
 
-Preencha `.env.local` com URL e chave **pública** anon do projeto Supabase. Não coloque a service role em arquivo `VITE_*` nem no frontend. `.env.local` é ignorado pelo Git. Para build: `npm.cmd run build`; para servir o build da PWA: `npm.cmd run preview -- --host 127.0.0.1`.
+Preencha `.env.local` apenas com `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (chave pública) e `VITE_TURNSTILE_SITE_KEY` (chave pública). O arquivo é ignorado pelo Git. Nunca use service role ou `TURNSTILE_SECRET_KEY` em variáveis `VITE_`.
 
-## Configuração Supabase pendente
+## Contas
 
-Nenhuma configuração remota é feita automaticamente por este repositório.
+Cadastro pede nome único e senha de 8 a 128 caracteres, sem convite. `ALLOW_PUBLIC_SIGNUP` controla a Edge Function: somente o texto exato `true` permite cadastro; `false`, valor ausente ou outro valor bloqueia. O cadastro aberto exige um token Turnstile válido; a função verifica token e hostname com a API Siteverify antes de criar o usuário. CORS restringe navegadores, mas não autentica o solicitante. Há limite por nome e limite global de 6 solicitações válidas por hora; considere também proteção contra abuso no Supabase e Cloudflare. O limite global pode afetar usuários legítimos se muitas contas forem abertas na mesma hora.
 
-1. Crie um projeto Supabase próprio. Desabilite cadastro público por e-mail em Authentication. Permita login por senha; o e-mail técnico é criado apenas pela função administrativa. Configure limites de rate no Auth e proteção de infraestrutura/WAF para o endpoint de conta.
-2. Aplique `supabase/migrations/202610310001_conex_v1.sql` em um ambiente de teste e depois no ambiente escolhido. Verifique a publicação Realtime de `messages` e `notifications`. Execute testes RLS com contas reais antes da publicação.
-3. Faça deploy da Edge Function `account` com `verify_jwt = false`, necessário para login/cadastro antes de existir uma sessão. Defina o segredo `APP_ORIGINS` como lista de origens web permitidas separadas por vírgula (por exemplo, `https://seu-dominio.example,http://localhost:5173`). O runtime da função deve receber `SUPABASE_URL`, `SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY` pelo ambiente seguro do Supabase, nunca pelo navegador.
-4. Configure URL de site, domínios HTTPS e chaves públicas no arquivo local `.env.local`. Para uso em dispositivos diferentes, publique em uma origem HTTPS acessível; localhost só serve no PC atual.
+`ACCOUNT_EMAIL_BASE` é o endereço Gmail controlado pela NexPoint, enviado **somente como Secret da função**. A função gera um alias `+conex-` com identificador aleatório para cada conta e usa a API administrativa do Supabase Auth com `email_confirm: true`. Assim, o cadastro não precisa receber e-mail. O recebimento em aliases Gmail ainda precisa de teste e os aliases não provam identidade individual; o proprietário do Gmail controla a recuperação de todas as contas. Não habilite fluxo público de redefinição por e-mail sem revisar esse modelo. Em caso de perda da senha, o administrador deve verificar a pessoa fora da aplicação e redefinir a conta pelo painel seguro do Supabase.
 
-### Gerar convite de uso único
+A função necessita dos Secrets `APP_ORIGINS` (origens exatas separadas por vírgula), `ACCOUNT_EMAIL_BASE`, `ALLOW_PUBLIC_SIGNUP` e `TURNSTILE_SECRET_KEY`. `SUPABASE_URL`, `SUPABASE_ANON_KEY` e `SUPABASE_SERVICE_ROLE_KEY` são fornecidos ao runtime Supabase ou devem ser configurados exclusivamente no servidor. O login usa nome e senha; `Manter conectado` escolhe entre `localStorage` e `sessionStorage`. O logout usa Supabase Auth.
 
-Execute a consulta abaixo **somente** no SQL Editor administrativo. Copie o token resultante para o destinatário em canal privado e monte o link `https://seu-dominio.example/?invite=TOKEN`. O token puro aparece uma única vez na saída desta consulta; o banco armazena somente seu SHA-256. Mude `interval '48 hours'` para a validade desejada. Não registre o link em logs ou analytics.
+## Banco e segurança
 
-```sql
-with secret as (select encode(gen_random_bytes(32), 'hex') as token),
-created as (
-  insert into public.invites (token_hash, expires_at)
-  select encode(extensions.digest(token, 'sha256'), 'hex'), now() + interval '48 hours'
-  from secret
-  returning id
-)
-select secret.token, created.id from secret cross join created;
-```
+A migration `supabase/migrations/202610310001_conex_v1.sql` **já foi aplicada** no projeto remoto informado; não a reaplique. Ela cria perfis, canais, mensagens, notificações, limite de tentativas e a tabela legada `invites` (não usada no cadastro atual). RLS permite leitura de mensagens apenas a membros ativos, inserção apenas pelo próprio autor, e leitura/atualização de notificações apenas pelo titular. Os limites de conteúdo, índices de paginação e três canais estão definidos no banco. Testes de RLS exigem um ambiente Supabase de teste e duas contas; veja [docs/RLS_TESTS.md](docs/RLS_TESTS.md). Não execute esses testes no projeto remoto de produção.
 
-O cadastro recebe o token pelo link, valida formato, validade e uso único no servidor; a senha fica apenas no Supabase Auth. Nomes são únicos sem diferenciar maiúsculas/minúsculas. Quando um usuário esquece a senha, um administrador deve verificar sua identidade fora da aplicação e redefinir pelo painel seguro do Supabase Auth, comunicando uma senha temporária por canal apropriado. A V1 não oferece recuperação automática por e-mail.
+Para testar duas contas, use perfis de navegador separados e duas redes/dispositivos após configurar uma origem HTTPS. Crie as contas quando o cadastro estiver aberto, feche o cadastro, faça login, envie mensagens nos três canais e confirme histórico após recarga, notificações, reconexão, logout e as duas opções de persistência. Sem esse teste real não há evidência de funcionamento entre redes.
 
-### Testar com duas contas
+## PWA e publicação
 
-Gere dois convites distintos. Crie duas contas em navegadores/perfis separados, acesse a mesma origem HTTPS em redes diferentes e entre com nome e senha. Envie uma mensagem em cada canal, confira autoria, persistência após recarga, recebimento Realtime e notificações em canal não selecionado. Teste marcar como lida, logout e a opção de manter conectado fechando e reabrindo o navegador. Desmarcada, a sessão fica em `sessionStorage`, limitada à aba/sessão do navegador.
+`npm.cmd run build` gera `dist`, incluindo manifesto, ícones e service worker. A interface pode ser instalada como PWA onde o navegador oferecer instalação. O aviso de nova versão oferece `Atualizar agora` e bloqueia atualização enquanto houver texto não enviado. O cache prévio contém arquivos da interface, não respostas de chat. Consulte [docs/DEPLOY.md](docs/DEPLOY.md) para atualizar a função e publicar manualmente no Cloudflare Pages, sem domínio pago obrigatório.
 
-### Segurança e limites
-
-RLS protege perfis, canais, mensagens e notificações. Visitantes anônimos não têm acesso às tabelas privadas. O backend valida nome, senha, convite e conteúdo; o banco valida autor, tamanho e canal. A função limita tentativas por nome de usuário, mas proteção contra ataques distribuídos requer limites adicionais no Supabase e na borda. O endereço de e-mail técnico não é um canal de recuperação. A função de cadastro executa criação no Auth e gravações no banco em etapas, com limpeza compensatória se falhar; uma interrupção abrupta pode exigir revisão administrativa de conta incompleta.
-
-Notificações são internas; não há push. Studio, Social, anexos e voz estão indisponíveis. A PWA atualiza o service worker após aviso e ação do usuário; mensagens ainda no campo de edição bloqueiam o botão de atualização. O cache offline é da interface, não do histórico privado. Um aplicativo Electron e seu mecanismo de atualização ficam para outra etapa.
+Studio, Social, voz, vídeo, anexos, push e Electron ficam para versões posteriores. A validação online da Edge Function, RLS, chat e PWA instalada depende da configuração externa e de testes reais.

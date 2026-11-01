@@ -2,10 +2,12 @@
 import type { Session } from '@supabase/supabase-js'
 import {
   installSession,
+  clearRemember,
   setRemember,
   supabase,
 } from '../../lib/supabase/client'
 import { validateUsername } from './validation'
+import { validateNewPassword } from './password'
 
 // Comunicação com a Edge Function do Supabase
 async function invokeAuth(
@@ -51,18 +53,17 @@ async function invokeAuth(
 export async function register(
   username: string,
   password: string,
+  challenge: string,
 ) {
   const normalized = validateUsername(username)
 
-  if (password.length < 12 || password.length > 128) {
-    throw new Error(
-      'A senha deve ter de 12 a 128 caracteres.',
-    )
-  }
+  validateNewPassword(password)
+  if (!challenge) throw new Error('Conclua a verificação de segurança.')
 
   await invokeAuth('register', {
     username: normalized,
     password,
+    challenge,
   })
 }
 
@@ -90,6 +91,8 @@ export async function login(
 
 // Encerrar sessão
 export async function logout() {
-  await supabase?.auth.signOut()
-  localStorage.removeItem('conex.remember')
+  if (!supabase) return
+  const { error } = await supabase.auth.signOut()
+  if (error) throw new Error('Não foi possível sair. Tente novamente.')
+  clearRemember()
 }
